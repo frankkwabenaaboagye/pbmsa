@@ -3,13 +3,45 @@ Transform: AWS::Serverless-2016-10-31
 Description: >
   pbmsa
 
-  Sample SAM Template for pbmsa
+  Photo Blog Microservice Application
 
 Globals:
   Function:
-    Timeout: 3
+    Timeout: 200
+    Runtime: python3.12
+    MemorySize: 3000
+
+
+Parameters:
+  DummyName:
+    Type: String
+    Description: Dummy Parameter in case I make modification to a func and I redeploy
+    Default: dummy
+  Stage:
+    Type: String
+    Description: Environment stage
+    Default: prod
+  PrimaryRegion:
+    Type: String
+    Default: "eu-west-1"
+  SecondaryRegion:  # my disaster recovery region
+    Type: String
+    Default: "eu-central-1"
+  AllowedOrigin:
+    Type: String
+    Description: "CORS allowed origin (Frontend URL)"
+    Default: "http://localhost:4200" # https://main.d17gnlmjpnk7at.amplifyapp.com
+
+Conditions:
+  IsSourceRegion: !Equals [!Ref AWS::Region, eu-west-1]
+  IsDestinationRegion: !Equals [!Ref AWS::Region, eu-central-1]
+
+  
+
 
 Resources:
+
+  ## serving as a test
   HelloWorldFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -24,6 +56,974 @@ Resources:
           Properties:
             Path: /hello
             Method: get
+
+
+  ## 🌐 API Gateway with Cognito Authorization
+  ApiGatewayApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: !Ref Stage
+      Cors:
+        AllowMethods: "'POST, GET, PUT, OPTIONS, DELETE'"
+        AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token, fileName'"
+        AllowOrigin: !Sub "'${AllowedOrigin}'"
+        AllowCredentials: true
+      Auth:
+        AddDefaultAuthorizerToCorsPreflight: false
+        DefaultAuthorizer: CognitoAuthorizer
+        Authorizers:
+          CognitoAuthorizer:
+            UserPoolArn: !GetAtt CognitoUserPool.Arn
+            Identity:
+              Header: Authorization
+      BinaryMediaTypes:
+        - image/*
+        - multipart/form-data
+
+  ## 🔐 Cognito User Pool
+  CognitoUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub ${AWS::StackName}-UserPool
+      AutoVerifiedAttributes:
+        - email
+      EmailConfiguration:
+        EmailSendingAccount: COGNITO_DEFAULT
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireUppercase: true
+          RequireLowercase: true
+          RequireNumbers: true
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: false
+      UsernameAttributes:
+        - email
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+          - Name: verified_email
+            Priority: 1
+      LambdaConfig:
+        PostConfirmation: !GetAtt PostConfirmationLambda.Arn 
+        PostAuthentication: !GetAtt PostAuthenticationLambda.Arn
+
+
+  ## 📝 CloudWatch Log Group for Post-Confirmation Lambda
+  PostConfirmationLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${AWS::StackName}-PostConfirmationLambda
+      RetentionInDays: 30
+
+
+  ## 🚀 Lambda Function for Post-Confirmation Events
+  PostConfirmationLambda:
+    Type: AWS::Serverless::Function
+    DependsOn: PostConfirmationLogGroup
+    Properties:
+      CodeUri: functions/user-management/
+      Handler: app.lambda_handler
+      FunctionName: !Sub ${AWS::StackName}-PostConfirmationLambda
+      Runtime: python3.12
+      Architectures:
+        - x86_64
+      Environment:
+        Variables:
+          SNS_TOPIC_ARN: !Ref LoginNotificationTopic
+          SNS_RETRY_TOPIC_ARN: !Ref ImageProcessingNotificationTopic
+          THE_AWS_REGION: !Sub ${AWS::Region}
+          STACK_NAME: !Sub ${AWS::StackName}
+          DUNAMT_ME: !Ref DummyName
+          GLOBAL_USER_INFO_TABLE_NAME: !Sub ${AWS::StackName}-user-information-table
+      Policies:
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action:
+                - cognito-idp:*
+              Resource: "*"
+            - Effect: Allow
+              Action:
+                - logs:*
+              Resource:
+                - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*
+            - Effect: Allow
+              Action:
+                - sns:*
+              Resource:
+                - !Ref LoginNotificationTopic
+                - !Ref ImageProcessingNotificationTopic
+            - Effect: Allow
+              Action:
+                - ssm:GetParameter
+              Resource: 
+                - !Sub arn:aws:ssm:eu-central-1:${AWS::AccountId}:parameter/${AWS::StackName}/*
+                - !Sub arn:aws:ssm:eu-west-1:${AWS::AccountId}:parameter/${AWS::StackName}/*
+            - Effect: Allow
+              Action:
+                - dynamodb:*
+              Resource: "*"
+
+
+  ## 🔑 Lambda Permission for Cognito to Invoke Post-Confirmation Lambda
+  PostConfirmationLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref PostConfirmationLambda
+      Principal: cognito-idp.amazonaws.com
+      SourceArn: !GetAtt CognitoUserPool.Arn
+
+
+  #🚀 user pool parameter
+  UserPoolParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/${AWS::StackName}/${AWS::Region}/UserPoolId"
+      Type: String
+      Value: !Ref CognitoUserPool
+      Description: !Sub "Cognito User Pool ID for ${AWS::Region} region"
+
+  ## 📢 SNS Topic for Login Notifications
+  LoginNotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: User Login Notifications
+
+  #🚀 post-auth-lambda-fnx
+  PostAuthenticationLambda:
+    Type: AWS::Serverless::Function
+    DependsOn: PostConfirmationLogGroup
+    Properties:
+      CodeUri: functions/post-auth/
+      Handler: app.lambda_handler
+      FunctionName: !Sub ${AWS::StackName}-PostAuthenticationLambda
+      Runtime: python3.12
+      Architectures:
+        - x86_64
+      Environment:
+        Variables:
+          SNS_TOPIC_ARN: !Ref LoginNotificationTopic
+          DUMMY_NAME: !Ref DummyName # will take it out
+      Policies:
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action:
+                - cognito-idp:*
+              Resource: "*"
+            - Effect: Allow
+              Action:
+                - logs:*
+              Resource:
+                - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*
+            - Effect: Allow
+              Action:
+                - sns:*
+              Resource:
+                - !Ref LoginNotificationTopic
+
+  ## 🔑 post-auth-permission
+  PostAuthenticationLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref PostAuthenticationLambda
+      Principal: cognito-idp.amazonaws.com
+      SourceArn: !GetAtt CognitoUserPool.Arn
+
+  ## 🖼️ SNS Topic for Image Processing Notifications
+  ImageProcessingNotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: Image Processing Notification
+      TopicName: !Sub ${AWS::StackName}-processing-notification
+
+  # 🚀 SQS Queue for retries
+  ImageProcessingQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub ${AWS::StackName}-ImageProcessingQueue
+      VisibilityTimeout: 200
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt ImageProcessingDLQ.Arn
+        maxReceiveCount: 2
+
+  # 🚀 DLQ (dead letter queue) for Image Processing Queue
+  ImageProcessingDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub ${AWS::StackName}-ImageProcessingDLQ
+      MessageRetentionPeriod: 1209600 # 14 days in seconds
+
+
+  # 🚀Add SNS Topic Subscription Filter Policies
+  ImageProcessingSubscriptionPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics:
+        - !Ref ImageProcessingNotificationTopic
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: sns.amazonaws.com
+            Action: sns:Publish
+            Resource: !Ref ImageProcessingNotificationTopic
+
+
+  # 🚀 cognito user pool client
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub ${AWS::StackName}-UserPoolClient
+      UserPoolId: !Ref CognitoUserPool
+      GenerateSecret: false
+      AllowedOAuthFlows:
+        - code
+        - implicit
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthScopes:
+        - email
+        - openid
+        - profile
+      CallbackURLs:
+        - http://localhost:4200/callback
+      LogoutURLs:
+        - http://localhost:42000
+      SupportedIdentityProviders:
+        - COGNITO
+      ExplicitAuthFlows:
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+        - ALLOW_USER_PASSWORD_AUTH
+      PreventUserExistenceErrors: ENABLED
+
+
+  # 🔐 cognito user pool domain
+  UserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      UserPoolId: !Ref CognitoUserPool
+      Domain: !Sub ${AWS::StackName}-${AWS::Region}-${AWS::AccountId} # More unique domain, must be globally unique
+
+  # 🆔 Identity Pool
+  IdentityPool:
+    Type: AWS::Cognito::IdentityPool
+    Properties:
+      IdentityPoolName: !Sub ${AWS::StackName}-IdentityPool
+      AllowUnauthenticatedIdentities: false
+      CognitoIdentityProviders:
+        - ClientId: !Ref UserPoolClient
+          ProviderName: !GetAtt CognitoUserPool.ProviderName
+          ServerSideTokenCheck: true
+
+
+  # ⏳ s3 bucket for staging - Staging bucket for initial uploads
+  StagingBucket:
+    Type: AWS::S3::Bucket
+    DependsOn: ProcessImageFunctionS3Permission
+    Properties:
+      BucketName: !Sub ${AWS::StackName}-image-staging-bucket-${AWS::Region}
+      LifecycleConfiguration:
+        Rules:
+          - Status: Enabled
+            ExpirationInDays: 1
+            Id: DeleteAfterProcessing
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: s3:ObjectCreated:*
+            Function: !GetAtt ProcessImageFunction.Arn
+
+
+  # 🖼️ s3 bucket for processed images - Processed images bucket (primary bucket)
+  ProcessedImagesBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${AWS::StackName}-processed-images-bucket-${AWS::Region}
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteMarkerCleanup
+            Status: Enabled
+            ExpirationInDays: 30
+            NoncurrentVersionExpirationInDays: 30
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders:
+              - "*"
+            AllowedMethods:
+              - GET
+              - POST
+              - PUT
+              - DELETE
+            AllowedOrigins:
+              - "*"
+      ReplicationConfiguration: !If
+        - IsSourceRegion
+        - Role: !GetAtt S3ReplicationRole.Arn
+          Rules:
+            - Destination:
+                Bucket: !Sub arn:aws:s3:::${AWS::StackName}-processed-images-bucket-eu-central-1
+              Status: Enabled
+              Priority: 1
+              DeleteMarkerReplication:
+                Status: Enabled
+              Filter:
+                Prefix: ""  # Replicate everything
+              SourceSelectionCriteria:
+                ReplicaModifications:
+                  Status: Enabled
+        - !Ref AWS::NoValue
+      Tags:
+        - Key: modeOfCreation
+          Value: thisautomated
+
+  # 🌍 the s3 replication role
+  S3ReplicationRole:
+    Type: AWS::IAM::Role
+    Condition: IsSourceRegion  # Only create in source region
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: s3.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: S3ReplicationPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetReplicationConfiguration
+                  - s3:ListBucket
+                Resource:
+                  - !Sub arn:aws:s3:::${AWS::StackName}-processed-images-bucket-${AWS::Region}
+              - Effect: Allow
+                Action:
+                  - s3:GetObjectVersion
+                  - s3:GetObjectVersionAcl
+                  - s3:GetObjectVersionTagging
+                Resource:
+                  - !Sub arn:aws:s3:::${AWS::StackName}-processed-images-bucket-${AWS::Region}/*
+              - Effect: Allow
+                Action:
+                  - s3:ReplicateObject
+                  - s3:ReplicateDelete
+                  - s3:ReplicateTags
+                  - s3:GetObjectVersionTagging
+                Resource:
+                  - !Sub arn:aws:s3:::${AWS::StackName}-processed-images-bucket-eu-central-1/*
+
+
+  # 🚀IAM Roles
+  PhotoBlogUserRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: cognito-identity.amazonaws.com
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                cognito-identity.amazonaws.com:aud: !Ref IdentityPool
+              ForAnyValue:StringLike:
+                cognito-identity.amazonaws.com:amr: authenticated
+      Policies:
+        - PolicyName: PhotoBlogUserRolePolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:*
+                Resource:
+                  - !GetAtt StagingBucket.Arn
+              - Effect: Allow
+                Action:
+                  - s3:*
+                Resource:
+                  - !GetAtt ProcessedImagesBucket.Arn
+
+  # 🚀Identity Pool Role Attachment
+  IdentityPoolRoleAttachment:
+    Type: AWS::Cognito::IdentityPoolRoleAttachment
+    Properties:
+      IdentityPoolId: !Ref IdentityPool
+      Roles:
+        authenticated: !GetAtt CognitoAuthRole.Arn
+        unauthenticated: !GetAtt CognitoUnauthRole.Arn
+      RoleMappings:
+        userpool1:
+          IdentityProvider: !Sub ${CognitoUserPool.ProviderName}:${UserPoolClient}
+          AmbiguousRoleResolution: Deny
+          Type: Rules
+          RulesConfiguration:
+            Rules:
+              - Claim: cognito:groups
+                MatchType: Contains
+                RoleARN: !GetAtt PhotoBlogUserRole.Arn
+                Value: PhotoBlogUserGroup
+
+  # 🚀 Cognito Authentication Roles
+  CognitoAuthRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: cognito-identity.amazonaws.com
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                cognito-identity.amazonaws.com:aud: !Ref IdentityPool
+              ForAnyValue:StringLike:
+                cognito-identity.amazonaws.com:amr: authenticated
+      Policies:
+        - PolicyName: CognitoAuthorizedPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - mobileanalytics:PutEvents
+                  - cognito-sync:*
+                Resource: "*"
+
+  # 🚀 Cognito Unauthorized Role
+  CognitoUnauthRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: cognito-identity.amazonaws.com
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                cognito-identity.amazonaws.com:aud: !Ref IdentityPool
+              ForAnyValue:StringLike:
+                cognito-identity.amazonaws.com:amr: unauthenticated
+      Policies:
+        - PolicyName: CognitoUnauthorizedPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Deny
+                Action: "*"
+                Resource: "*"
+
+  # 🚀 photo blog user group
+  PhotoBlogUserGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: PhotoBlogUserGroup
+      UserPoolId: !Ref CognitoUserPool
+      Description: Group for users of the application
+      Precedence: 0
+      RoleArn: !GetAtt PhotoBlogUserRole.Arn
+
+
+  # 🏷️ dynamodb table for user images
+  UserImagesTable:
+    Type: AWS::DynamoDB::GlobalTable
+    Condition: IsSourceRegion
+    Properties:
+      TableName: !Sub ${AWS::StackName}-user-images-table
+      AttributeDefinitions:
+        - AttributeName: user_id
+          AttributeType: S
+        - AttributeName: image_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: user_id
+          KeyType: HASH
+        - AttributeName: image_id
+          KeyType: RANGE
+      BillingMode: PAY_PER_REQUEST
+      Replicas:
+        - Region: !Ref PrimaryRegion
+          PointInTimeRecoverySpecification:
+            PointInTimeRecoveryEnabled: true
+        - Region: !Ref SecondaryRegion
+          PointInTimeRecoverySpecification:
+            PointInTimeRecoveryEnabled: true
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+    
+
+  # 🏷️ dynamodb table for user image sharing
+  ImageSharingTable:
+    Type: AWS::DynamoDB::GlobalTable
+    Condition: IsSourceRegion
+    Properties:
+      TableName: !Sub ${AWS::StackName}-image-sharing
+      AttributeDefinitions:
+        - AttributeName: share_token
+          AttributeType: S
+      KeySchema:
+        - AttributeName: share_token
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+      TimeToLiveSpecification:
+        AttributeName: expires_at
+        Enabled: true
+      Replicas:
+        - Region: !Ref PrimaryRegion
+          PointInTimeRecoverySpecification:
+            PointInTimeRecoveryEnabled: true
+        - Region: !Ref SecondaryRegion
+          PointInTimeRecoverySpecification:
+            PointInTimeRecoveryEnabled: true
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+
+
+  # ⚡upload image lambda function
+  UploadImageFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: functions/upload/
+      Handler: app.lambda_handler
+      Runtime: python3.12
+      MemorySize: 3000 # 10 GB
+      Architectures:
+        - x86_64
+      Environment:
+        Variables:
+          STAGE_BUCKET: !Ref StagingBucket
+          USER_TABLE: !Sub ${AWS::StackName}-user-images-table
+          DUMY_NAM_DA: !Ref DummyName
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Ref StagingBucket
+        - DynamoDBCrudPolicy:
+            TableName: !Sub ${AWS::StackName}-user-images-table
+        - CloudWatchLogsFullAccess
+      Events:
+        UploadAPI:
+          Type: Api
+          Properties:
+            Path: /images/upload
+            Method: post
+            RequestParameters:
+              - method.request.header.Content-Length:
+                  Required: true
+            RestApiId: !Ref ApiGatewayApi
+
+  # ⚡ delete image
+  DeleteImageFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: functions/delete/
+      Handler: app.lambda_handler
+      Runtime: python3.12
+      MemorySize: 3000 # 10 GB
+      Architectures:
+        - x86_64
+      Environment:
+        Variables:
+          STAGE_BUCKET: !Ref StagingBucket
+          USER_IMAGES_TABLE: !Sub ${AWS::StackName}-user-images-table
+          PROCESSED_BUCKET: !Ref ProcessedImagesBucket
+          IMAGE_SHARING_TABLE: !Sub ${AWS::StackName}-image-sharing
+          DUMAT: !Ref DummyName
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Ref StagingBucket
+        - S3CrudPolicy:
+            BucketName: !Ref ProcessedImagesBucket
+        - DynamoDBCrudPolicy:
+            TableName: !Sub ${AWS::StackName}-user-images-table
+        - DynamoDBCrudPolicy:
+            TableName: !Sub ${AWS::StackName}-image-sharing
+        - CloudWatchLogsFullAccess
+      Events:
+        DeleteAPI:
+          Type: Api
+          Properties:
+            Path: /images/delete/{image_id}
+            Method: delete
+            RestApiId: !Ref ApiGatewayApi
+
+  # ⚡ restore image
+  RestoreImageFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: functions/restore/
+      Handler: app.lambda_handler
+      Runtime: python3.12
+      MemorySize: 3000 # 10 GB
+      Architectures:
+        - x86_64
+      Environment:
+        Variables:
+          STAGE_BUCKET: !Ref StagingBucket
+          USER_IMAGES_TABLE: !Sub ${AWS::StackName}-user-images-table
+          IMAGE_SHARING_TABLE: !Sub ${AWS::StackName}-image-sharing
+          DUMY_DAT: !Ref DummyName
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Ref StagingBucket
+        - DynamoDBCrudPolicy:
+            TableName: !Sub ${AWS::StackName}-user-images-table
+        - DynamoDBCrudPolicy:
+            TableName: !Sub ${AWS::StackName}-image-sharing
+        - CloudWatchLogsFullAccess
+      Events:
+        RestoreAPI:
+          Type: Api
+          Properties:
+            Path: /images/restore/{image_id}
+            Method: put
+            RestApiId: !Ref ApiGatewayApi
+
+  # ⚡ view watermark image
+  ViewImageFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: functions/view/
+      Handler: app.lambda_handler
+      Runtime: python3.12
+      MemorySize: 3000 # 10 GB
+      Architectures:
+        - x86_64
+      Environment:
+        Variables:
+          PROCESSED_BUCKET: !Ref ProcessedImagesBucket
+          USER_IMAGES_TABLE: !Sub ${AWS::StackName}-user-images-table
+          DUMMYBA_AME_: !Ref DummyName
+          IMAGE_SHARING_TABLE: !Sub ${AWS::StackName}-image-sharing
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Ref ProcessedImagesBucket
+        - DynamoDBCrudPolicy:
+            TableName: !Sub ${AWS::StackName}-user-images-table
+        - DynamoDBCrudPolicy:
+            TableName: !Sub ${AWS::StackName}-image-sharing
+        - CloudWatchLogsFullAccess
+      Events:
+        GetAllImages:
+          Type: Api
+          Properties:
+            Path: /images
+            Method: get
+            RestApiId: !Ref ApiGatewayApi
+        GetSingleImage:
+          Type: Api
+          Properties:
+            Path: /images/{image_id}
+            Method: get
+            RestApiId: !Ref ApiGatewayApi
+        GetSharedImage:
+          Type: Api
+          Properties:
+            Path: /images/shared/{share_token}
+            Method: get
+            RestApiId: !Ref ApiGatewayApi
+            Auth:
+              Authorizer: NONE
+
+  # ⚡ health check function
+  HealthCheckFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: functions/health/
+      Handler: app.lambda_handler
+      Runtime: python3.12
+      Architectures:
+        - x86_64
+      Environment:
+        Variables:
+          THE_AWS_REGION: !Sub ${AWS::Region}
+          DU_NAME: !Ref DummyName
+      Policies:
+        - CloudWatchLogsFullAccess
+      Events:
+        GetHealth:
+          Type: Api
+          Properties:
+            Path: /health
+            Method: get
+            RestApiId: !Ref ApiGatewayApi
+            Auth:
+              Authorizer: NONE
+        ChangeHealth:
+          Type: Api
+          Properties:
+            Path: /health
+            Method: post
+            RestApiId: !Ref ApiGatewayApi
+            Auth:
+              Authorizer: NONE
+
+
+  # ⚡ process image lambda function
+  ProcessImageFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: functions/process/
+      Handler: app.lambda_handler
+      Runtime: python3.12
+      MemorySize: 3000 # 10 GB
+      Architectures:
+        - x86_64
+      Environment:
+        Variables:
+          PRIMARY_BUCKET: !Ref ProcessedImagesBucket
+          USER_TABLE: !Sub ${AWS::StackName}-user-images-table #!Ref UserImagesTable
+          DUMNAME: !Ref DummyName
+          USER_POOL_ID: !Ref CognitoUserPool
+          SQS_QUEUE_URL: !Ref ImageProcessingQueue
+          SNS_RETRY_TOPIC_ARN: !Ref ImageProcessingNotificationTopic
+          THE_REGION: !Sub ${AWS::Region} # will change this
+      Role: !GetAtt ProcessImageFunctionRole.Arn
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Ref ProcessedImagesBucket
+        - DynamoDBCrudPolicy:
+            TableName: !Sub ${AWS::StackName}-user-images-table #!Ref UserImagesTable
+        - CloudWatchLogsFullAccess
+        - Statement:
+            - Effect: Allow
+              Action:
+                - cognito-idp:AdminGetUser
+                - cognito-idp:AdminUpdateUserAttributes
+                - cognito-idp:AdminAddUserToGroup
+                # list users
+                - cognito-idp:ListUsers
+                - cognito-idp:ListUsersInGroup
+                - cognito-idp:ListGroups
+              Resource: !GetAtt CognitoUserPool.Arn
+      Events:
+        SQSEvent: # trigger for retries
+          Type: SQS
+          Properties:
+            Queue: !GetAtt ImageProcessingQueue.Arn
+            BatchSize: 10
+
+  # 🚀 process image fnx s3 permission
+  ProcessImageFunctionS3Permission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt ProcessImageFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+      SourceArn: !Sub arn:aws:s3:::${AWS::StackName}-image-staging-bucket-${AWS::Region}
+
+  # 🛡️ process image function role
+  ProcessImageFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ProcessImageFunctionPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:ListBucket
+                  - s3:DeleteObject
+                  - s3:GetBucketLocation
+                  - s3:GetObjectVersion
+                  - s3:ListBucketVersions
+                Resource:
+                  - !Sub "arn:aws:s3:::${ProcessedImagesBucket}"
+                  - !Sub "arn:aws:s3:::${ProcessedImagesBucket}/*"
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:ListBucket
+                  - s3:DeleteObject
+                  - s3:GetBucketLocation
+                  - s3:GetObjectVersion
+                  - s3:ListBucketVersions
+                Resource:
+                  - !Sub "arn:aws:s3:::${AWS::StackName}-image-staging-bucket-${AWS::Region}"
+                  - !Sub "arn:aws:s3:::${AWS::StackName}-image-staging-bucket-${AWS::Region}/*"
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                Resource: !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${AWS::StackName}-user-images-table"
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*"
+              - Effect: Allow
+                Action:
+                  - cognito-idp:AdminGetUser
+                  - cognito-idp:AdminAddUserToGroup
+                  - cognito-idp:ListUsersInGroup
+                  - cognito-idp:ListGroups
+                  - cognito-idp:ListUsers
+                # Resource: !Sub "arn:aws:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/${CognitoUserPool}"
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                  - sns:Subscribe
+                  - sns:Unsubscribe
+                  - sns:GetTopicAttributes
+                  - sns:SetTopicAttributes
+                Resource: !Ref ImageProcessingNotificationTopic
+              - Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                Resource: !GetAtt ImageProcessingQueue.Arn
+
+  # 🏷️ the user blogs table
+  UserBlogsTable:
+    Type: AWS::DynamoDB::GlobalTable
+    Condition: IsSourceRegion
+    Properties:
+      TableName: !Sub ${AWS::StackName}-user-blogs-table
+      AttributeDefinitions:
+        - AttributeName: user_id
+          AttributeType: S
+        - AttributeName: blog_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: user_id
+          KeyType: HASH
+        - AttributeName: blog_id
+          KeyType: RANGE
+      BillingMode: PAY_PER_REQUEST
+      GlobalSecondaryIndexes:
+        - IndexName: BlogTitleIndex
+          KeySchema:
+            - AttributeName: blog_id
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      Replicas:
+        - Region: !Ref PrimaryRegion
+          PointInTimeRecoverySpecification:
+            PointInTimeRecoveryEnabled: true
+        - Region: !Ref SecondaryRegion
+          PointInTimeRecoverySpecification:
+            PointInTimeRecoveryEnabled: true
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+
+  # 🚀 blog management lambda function
+  BlogManagementFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: functions/blog-management/
+      Handler: app.lambda_handler
+      Runtime: python3.12
+      Architectures:
+        - x86_64
+      Environment:
+        Variables:
+          BLOGS_TABLE: !Sub ${AWS::StackName}-user-blogs-table
+          DUMY_NAME: !Ref DummyName
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Sub ${AWS::StackName}-user-blogs-table
+        - CloudWatchLogsFullAccess
+      Events:
+        CreateBlog:
+          Type: Api
+          Properties:
+            Path: /blogs
+            Method: post
+            RestApiId: !Ref ApiGatewayApi
+        GetUserBlogs:
+          Type: Api
+          Properties:
+            Path: /blogs
+            Method: get
+            RestApiId: !Ref ApiGatewayApi
+        GetBlog:
+          Type: Api
+          Properties:
+            Path: /blogs/{blog_id}
+            Method: get
+            RestApiId: !Ref ApiGatewayApi
+        UpdateBlog:
+          Type: Api
+          Properties:
+            Path: /blogs/{blog_id}
+            Method: put
+            RestApiId: !Ref ApiGatewayApi
+        DeleteBlog:
+          Type: Api
+          Properties:
+            Path: /blogs/{blog_id}
+            Method: delete
+            RestApiId: !Ref ApiGatewayApi
+
+
+  # ⚡ dynamodb table for storing user details for oth regions
+  UserInformationTable:
+    Type: AWS::DynamoDB::GlobalTable
+    Condition: IsSourceRegion
+    Properties:
+      TableName: !Sub ${AWS::StackName}-user-information-table
+      AttributeDefinitions:
+        - AttributeName: user_id
+          AttributeType: S
+        - AttributeName: email
+          AttributeType: S
+      KeySchema:
+        - AttributeName: user_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: EmailIndex
+          KeySchema:
+            - AttributeName: email
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      BillingMode: PAY_PER_REQUEST
+      Replicas:
+        - Region: !Ref PrimaryRegion
+          PointInTimeRecoverySpecification:
+            PointInTimeRecoveryEnabled: true
+        - Region: !Ref SecondaryRegion
+          PointInTimeRecoverySpecification:
+            PointInTimeRecoveryEnabled: true
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+ 
+
+
+
+
 
 Outputs:
   HelloWorldApi:

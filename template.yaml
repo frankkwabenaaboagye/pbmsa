@@ -784,7 +784,7 @@ Resources:
         Variables:
           PRIMARY_BUCKET: !Ref ProcessedImagesBucket
           USER_TABLE: !Sub ${AWS::StackName}-user-images-table #!Ref UserImagesTable
-          DUMNAME: !Ref DummyName
+          DUMNAME_DATA: !Ref DummyName
           USER_POOL_ID: !Ref CognitoUserPool
           SQS_QUEUE_URL: !Ref ImageProcessingQueue
           SNS_RETRY_TOPIC_ARN: !Ref ImageProcessingNotificationTopic

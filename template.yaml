@@ -30,7 +30,7 @@ Parameters:
   AllowedOrigin:
     Type: String
     Description: "CORS allowed origin (Frontend URL)"
-    Default: "http://localhost:4200" # https://main.d17gnlmjpnk7at.amplifyapp.com
+    Default: "https://main.d17gnlmjpnk7at.amplifyapp.com" # https://main.d17gnlmjpnk7at.amplifyapp.com 
 
 Conditions:
   IsSourceRegion: !Equals [!Ref AWS::Region, eu-west-1]
@@ -289,9 +289,9 @@ Resources:
         - openid
         - profile
       CallbackURLs:
-        - http://localhost:4200/callback
+        - https://main.d17gnlmjpnk7at.amplifyapp.com/callback
       LogoutURLs:
-        - http://localhost:42000
+        - https://main.d17gnlmjpnk7at.amplifyapp.com
       SupportedIdentityProviders:
         - COGNITO
       ExplicitAuthFlows:
@@ -639,7 +639,7 @@ Resources:
           USER_IMAGES_TABLE: !Sub ${AWS::StackName}-user-images-table
           PROCESSED_BUCKET: !Ref ProcessedImagesBucket
           IMAGE_SHARING_TABLE: !Sub ${AWS::StackName}-image-sharing
-          DUMAT: !Ref DummyName
+          DUMMMY_DATA_NAME: !Ref DummyName
       Policies:
         - S3CrudPolicy:
             BucketName: !Ref StagingBucket
@@ -673,7 +673,7 @@ Resources:
           STAGE_BUCKET: !Ref StagingBucket
           USER_IMAGES_TABLE: !Sub ${AWS::StackName}-user-images-table
           IMAGE_SHARING_TABLE: !Sub ${AWS::StackName}-image-sharing
-          DUMY_DAT: !Ref DummyName
+          DUMMMY_DATA_NAME: !Ref DummyName
       Policies:
         - S3CrudPolicy:
             BucketName: !Ref StagingBucket
@@ -704,7 +704,7 @@ Resources:
         Variables:
           PROCESSED_BUCKET: !Ref ProcessedImagesBucket
           USER_IMAGES_TABLE: !Sub ${AWS::StackName}-user-images-table
-          DUMMYBA_AME_: !Ref DummyName
+          DUMMY_DATA_NAME: !Ref DummyName
           IMAGE_SHARING_TABLE: !Sub ${AWS::StackName}-image-sharing
       Policies:
         - S3CrudPolicy:
@@ -748,7 +748,7 @@ Resources:
       Environment:
         Variables:
           THE_AWS_REGION: !Sub ${AWS::Region}
-          DU_NAME: !Ref DummyName
+          DUMMY_DATA_NAME: !Ref DummyName
       Policies:
         - CloudWatchLogsFullAccess
       Events:
@@ -784,7 +784,7 @@ Resources:
         Variables:
           PRIMARY_BUCKET: !Ref ProcessedImagesBucket
           USER_TABLE: !Sub ${AWS::StackName}-user-images-table #!Ref UserImagesTable
-          DUMNAME_DATA: !Ref DummyName
+          DUMMMY_DATA_NAME: !Ref DummyName
           USER_POOL_ID: !Ref CognitoUserPool
           SQS_QUEUE_URL: !Ref ImageProcessingQueue
           SNS_RETRY_TOPIC_ARN: !Ref ImageProcessingNotificationTopic
@@ -950,7 +950,7 @@ Resources:
       Environment:
         Variables:
           BLOGS_TABLE: !Sub ${AWS::StackName}-user-blogs-table
-          DUMY_NAME: !Ref DummyName
+          DUMMY_DATA_NAME: !Ref DummyName
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Sub ${AWS::StackName}-user-blogs-table

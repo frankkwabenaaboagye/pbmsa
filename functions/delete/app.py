@@ -16,7 +16,7 @@ logger.setLevel(logging.INFO)
 
 myHeaders = {
     'Access-Control-Allow-Headers': 'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token,fileName',
-    'Access-Control-Allow-Origin': 'http://localhost:4200',
+    'Access-Control-Allow-Origin': 'https://main.d17gnlmjpnk7at.amplifyapp.com',
     'Access-Control-Allow-Methods': 'POST, GET, PUT, OPTIONS, DELETE',
     'Access-Control-Allow-Credentials': 'true'
 }

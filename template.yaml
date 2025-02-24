@@ -66,7 +66,7 @@ Resources:
       Cors:
         AllowMethods: "'POST, GET, PUT, OPTIONS, DELETE'"
         AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token, fileName'"
-        AllowOrigin: !Sub "'${AllowedOrigin}'"
+        AllowOrigin: !Sub "'https://main.d17gnlmjpnk7at.amplifyapp.com'"
         AllowCredentials: true
       Auth:
         AddDefaultAuthorizerToCorsPreflight: false
@@ -704,7 +704,7 @@ Resources:
         Variables:
           PROCESSED_BUCKET: !Ref ProcessedImagesBucket
           USER_IMAGES_TABLE: !Sub ${AWS::StackName}-user-images-table
-          DUMMY_DATA_NAME: !Ref DummyName
+          DUMMY_NAME_DATA: !Ref DummyName
           IMAGE_SHARING_TABLE: !Sub ${AWS::StackName}-image-sharing
       Policies:
         - S3CrudPolicy:
